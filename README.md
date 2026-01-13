@@ -1,4 +1,4 @@
-````markdown
+
 # Yi-Rang MQ (Yi-Rang-MQ)
 
 Legacy embedded IPC를 위한 경량 메시지 큐(MQ) 데몬/서비스입니다.  
