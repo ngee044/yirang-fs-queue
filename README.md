@@ -1,8 +1,9 @@
 
 # Yi-Rang MQ (Yi-Rang-MQ)
 
-Legacy embedded IPC를 위한 경량 메시지 큐(MQ) 데몬/서비스입니다.  
+Legacy embedded 시스템을 위한 IPC를 위한 경량 메시지 큐(MQ) 데몬/서비스입니다.  
 SQS처럼 단순한 사용성을 목표로 하며, 레거시 임베디드 환경에서 장비 변경 및 신규 프로세스 도입으로 복잡해지는 프로세스 간 메시지 통신을 저비용/저사양으로 처리하도록 설계되었습니다.
+네트워크 통신이 아닌 파일/DB(SQLite)를 통한 통신으로 최소 요구 사양을 요구하는 시스템 설계를 위한 소프트웨어 입니다.
 
 - 메시지 및 설정/정책: **JSON**
 - 운영 형태: **Manager Process(데몬) + Consumer Process(Main Process) + CLI**
