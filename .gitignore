@@ -56,6 +56,9 @@ logs/
 .env
 .env.local
 .env.*.local
+.claudeignore
+.codexignore
+.cursorignore
 CLAUDE.md
 
 
