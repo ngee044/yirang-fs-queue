@@ -1,0 +1,9 @@
+{
+	"dependencies": [
+        "lz4",
+        "efsw",
+        "sqlite3",
+        "nlohmann-json" 
+	]
+}
+
