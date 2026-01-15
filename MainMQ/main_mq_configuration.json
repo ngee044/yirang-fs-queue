@@ -1,3 +1,63 @@
 {
-    
+  "schemaVersion": "0.1",
+  "nodeId": "local-01",
+  "backend": "sqlite",
+  "paths": {
+    "dataRoot": "./data",
+    "logRoot": "./logs"
+  },
+  "sqlite": {
+    "dbPath": "./data/yirangmq.db",
+    "kvTable": "kv",
+    "messageIndexTable": "msg_index",
+    "schemaPath": "./sqlite_schema.sql",
+    "busyTimeoutMs": 5000,
+    "journalMode": "WAL",
+    "synchronous": "NORMAL"
+  },
+  "filesystem": {
+    "root": "./data/fs",
+    "inboxDir": "inbox",
+    "processingDir": "processing",
+    "archiveDir": "archive",
+    "dlqDir": "dlq",
+    "metaDir": "meta"
+  },
+  "lease": {
+    "visibilityTimeoutSec": 30,
+    "sweepIntervalMs": 1000
+  },
+  "policyDefaults": {
+    "visibilityTimeoutSec": 30,
+    "retry": {
+      "limit": 5,
+      "backoff": "exponential",
+      "initialDelaySec": 1,
+      "maxDelaySec": 60
+    },
+    "dlq": {
+      "enabled": true,
+      "queue": "telemetry-dlq",
+      "retentionDays": 14
+    }
+  },
+  "queues": [
+    {
+      "name": "telemetry",
+      "policy": {
+        "visibilityTimeoutSec": 30,
+        "retry": {
+          "limit": 5,
+          "backoff": "exponential",
+          "initialDelaySec": 1,
+          "maxDelaySec": 60
+        },
+        "dlq": {
+          "enabled": true,
+          "queue": "telemetry-dlq",
+          "retentionDays": 14
+        }
+      }
+    }
+  ]
 }
