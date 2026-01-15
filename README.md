@@ -216,6 +216,46 @@ sequenceDiagram
 * consume: 트랜잭션으로 SELECT+UPDATE하여 lease 확보 (state=ready→inflight, lease_until 설정)
 * ack/nack: state 업데이트 및 실패 메타 기록
 
+**Key-Value model (planned)**
+
+* SQLite 테이블을 Redis-like `key`, `value` 컨셉으로 사용
+* value는 JSON(TEXT)로 저장하고, queue/state 조회를 위한 보조 컬럼/인덱스(또는 보조 테이블) 병행
+* key 네임스페이스 예: `queue:telemetry:message:{messageId}`, `queue:telemetry:policy`
+
+## SQLite KV Schema (Draft)
+
+KV로 원본 데이터를 저장하고, 큐 조회는 보조 인덱스 테이블을 사용합니다.
+
+```sql
+CREATE TABLE kv (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  value_type TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  expires_at INTEGER
+);
+
+CREATE TABLE msg_index (
+  queue TEXT NOT NULL,
+  state TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  available_at INTEGER NOT NULL,
+  lease_until INTEGER,
+  attempt INTEGER NOT NULL DEFAULT 0,
+  message_key TEXT NOT NULL REFERENCES kv(key) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_msg_ready ON msg_index(queue, state, available_at, priority);
+CREATE INDEX idx_msg_lease ON msg_index(state, lease_until);
+```
+
+Key 네임스페이스 예시:
+
+* `queue:telemetry:message:{messageId}`
+* `queue:telemetry:policy`
+* `queue:telemetry:lease:{messageId}`
+
 ---
 
 ## Message Model (JSON)
@@ -270,6 +310,20 @@ sequenceDiagram
   }
 }
 ```
+
+---
+
+## MainMQ Configuration (Draft)
+
+`MainMQ/main_mq_configuration.json`에서 Manager 설정 스키마를 정의합니다.
+
+* `schemaVersion`: 설정 스키마 버전
+* `backend`: `sqlite` 또는 `filesystem`
+* `paths`: data/log 루트 경로
+* `sqlite`: DB 경로, KV/인덱스 테이블명, 스키마 경로, WAL 관련 옵션
+* `filesystem`: FS 루트 및 상태 폴더 구성
+* `policyDefaults`: 전역 기본 정책
+* `queues`: 큐별 정책 오버라이드
 
 ---
 
@@ -369,6 +423,19 @@ yirangmq dlq requeue --backend fs --queue telemetry-dlq --filter reasonCode=TIME
 * [ ] Metrics/Health output
 * [ ] Stress & fault tests (kill -9, reboot/power-loss scenarios)
 * [ ] Documentation: backend 선택 가이드, 운영 매뉴얼
+
+### MainMQ Implementation Roadmap (Draft)
+
+MainMQ는 Manager Process로서 큐/정책/백엔드를 오케스트레이션합니다.
+
+1. 설정 스키마 확정 + 로더 구현 (backend 선택, 경로/DB, 정책 기본값)
+2. 도메인 모델 정의 (Queue, Message, Policy, Lease, Retry, DLQ) 및 상태 전이 규칙
+3. Backend Adapter 인터페이스 설계 (enqueue/lease/ack/nack, metrics)
+4. SQLite Adapter 1차 구현: KV 테이블 + 상태/큐 인덱스 + 트랜잭션 경계
+5. Lease/Retry/DLQ 스케줄러 구현 (timeout 회수, backoff 재스케줄)
+6. Manager API/IPC 최소 구현 + CLI 연동 (publish/consume-next/status)
+7. 관측/로그/메트릭 출력 + 복구 시나리오 검증
+8. FileSystem Adapter 추가 + 교체 테스트
 
 ---
 
