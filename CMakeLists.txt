@@ -29,6 +29,6 @@ find_package(Threads REQUIRED)
 add_subdirectory(CommonLibrary)
 add_subdirectory(MainMQ)
 
-# Samples 
-#add_subdirectory(Samples)
+# Samples
+add_subdirectory(Samples)
 #add_subdirectory(ExampleProject)
