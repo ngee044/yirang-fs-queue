@@ -3,21 +3,26 @@
 #include "ArgumentParser.h"
 #include "BackendAdapter.h"
 #include "LogTypes.h"
+#include "MailboxTypes.h"
 
 #include <string>
 #include <vector>
 
 using namespace Utilities;
 
-namespace YiRang
+// Operation mode
+enum class OperationMode
 {
-	namespace MQ
-	{
-		struct QueueConfig
-		{
-			std::string name;
-			QueuePolicy policy;
-		};
+	MailboxSqlite,
+	MailboxFileSystem,
+	Hybrid
+};
+
+struct QueueConfig
+{
+	std::string name;
+	QueuePolicy policy;
+};
 
 		class Configurations
 		{
@@ -38,6 +43,10 @@ namespace YiRang
 			auto schema_version() -> std::string;
 			auto node_id() -> std::string;
 			auto backend_type() -> BackendType;
+			auto operation_mode() -> OperationMode;
+
+			// IPC (Mailbox)
+			auto mailbox_config() -> MailboxConfig;
 
 			// SQLite
 			auto sqlite_config() -> SQLiteConfig;
@@ -68,11 +77,14 @@ namespace YiRang
 		protected:
 			auto load() -> void;
 			auto parse(ArgumentParser& arguments) -> void;
+			auto validate() -> void;
 
 		private:
 			auto load_retry_policy(const void* json_obj) -> RetryPolicy;
 			auto load_dlq_policy(const void* json_obj) -> DlqPolicy;
 			auto load_queue_policy(const void* json_obj) -> QueuePolicy;
+			auto validate_retry_policy(RetryPolicy& policy, const std::string& context) -> void;
+			auto validate_queue_policy(QueuePolicy& policy, const std::string& context) -> void;
 
 		private:
 			// Logging
@@ -88,6 +100,10 @@ namespace YiRang
 			std::string schema_version_;
 			std::string node_id_;
 			BackendType backend_type_;
+			OperationMode operation_mode_;
+
+			// IPC (Mailbox)
+			MailboxConfig mailbox_config_;
 
 			// SQLite
 			SQLiteConfig sqlite_config_;
@@ -105,5 +121,3 @@ namespace YiRang
 			// Queues
 			std::vector<QueueConfig> queues_;
 		};
-	} // namespace MQ
-} // namespace YiRang

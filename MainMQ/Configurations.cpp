@@ -6,15 +6,35 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <format>
+#include <set>
 
 using json = nlohmann::json;
 
-namespace YiRang
+namespace
 {
-	namespace MQ
+	auto is_valid_queue_name(const std::string& name) -> bool
 	{
+		if (name.empty() || name.length() > 256)
+		{
+			return false;
+		}
+
+		// Allow alphanumeric, hyphen, underscore
+		return std::all_of(name.begin(), name.end(), [](char c) {
+			return std::isalnum(c) || c == '-' || c == '_';
+		});
+	}
+
+	auto is_valid_backoff_type(const std::string& backoff) -> bool
+	{
+		static const std::set<std::string> valid_types = { "exponential", "linear", "fixed" };
+		return valid_types.find(backoff) != valid_types.end();
+	}
+}
+
 		Configurations::Configurations(ArgumentParser&& arguments)
 			: write_file_(LogTypes::None)
 			, write_console_(LogTypes::Information)
@@ -24,6 +44,7 @@ namespace YiRang
 			, schema_version_("0.1")
 			, node_id_("local-01")
 			, backend_type_(BackendType::SQLite)
+			, operation_mode_(OperationMode::MailboxSqlite)
 			, lease_visibility_timeout_sec_(30)
 			, lease_sweep_interval_ms_(1000)
 		{
@@ -43,6 +64,15 @@ namespace YiRang
 			filesystem_config_.dlq_dir = "dlq";
 			filesystem_config_.meta_dir = "meta";
 
+			// IPC (Mailbox) defaults
+			mailbox_config_.root = "./ipc";
+			mailbox_config_.requests_dir = "requests";
+			mailbox_config_.processing_dir = "processing";
+			mailbox_config_.responses_dir = "responses";
+			mailbox_config_.dead_dir = "dead";
+			mailbox_config_.stale_timeout_ms = 30000;
+			mailbox_config_.poll_interval_ms = 100;
+
 			// Policy defaults
 			policy_defaults_.visibility_timeout_sec = 30;
 			policy_defaults_.retry.limit = 5;
@@ -57,6 +87,7 @@ namespace YiRang
 
 			load();
 			parse(arguments);
+			validate();
 		}
 
 		Configurations::~Configurations(void) {}
@@ -71,6 +102,9 @@ namespace YiRang
 		auto Configurations::schema_version() -> std::string { return schema_version_; }
 		auto Configurations::node_id() -> std::string { return node_id_; }
 		auto Configurations::backend_type() -> BackendType { return backend_type_; }
+		auto Configurations::operation_mode() -> OperationMode { return operation_mode_; }
+
+		auto Configurations::mailbox_config() -> MailboxConfig { return mailbox_config_; }
 
 		auto Configurations::sqlite_config() -> SQLiteConfig { return sqlite_config_; }
 		auto Configurations::sqlite_db_path() -> std::string { return sqlite_config_.db_path; }
@@ -153,6 +187,28 @@ namespace YiRang
 					{
 						backend_type_ = BackendType::FileSystem;
 					}
+					else if (backend == "hybrid")
+					{
+						backend_type_ = BackendType::Hybrid;
+					}
+				}
+
+				// Operation mode
+				if (config.contains("mode") && config["mode"].is_string())
+				{
+					std::string mode = config["mode"].get<std::string>();
+					if (mode == "mailbox_sqlite")
+					{
+						operation_mode_ = OperationMode::MailboxSqlite;
+					}
+					else if (mode == "mailbox_fs" || mode == "mailbox_filesystem")
+					{
+						operation_mode_ = OperationMode::MailboxFileSystem;
+					}
+					else if (mode == "hybrid")
+					{
+						operation_mode_ = OperationMode::Hybrid;
+					}
 				}
 
 				// Paths
@@ -226,6 +282,40 @@ namespace YiRang
 					if (fs.contains("metaDir") && fs["metaDir"].is_string())
 					{
 						filesystem_config_.meta_dir = fs["metaDir"].get<std::string>();
+					}
+				}
+
+				// IPC (Mailbox) config
+				if (config.contains("ipc") && config["ipc"].is_object())
+				{
+					auto& ipc = config["ipc"];
+					if (ipc.contains("root") && ipc["root"].is_string())
+					{
+						mailbox_config_.root = ipc["root"].get<std::string>();
+					}
+					if (ipc.contains("requestsDir") && ipc["requestsDir"].is_string())
+					{
+						mailbox_config_.requests_dir = ipc["requestsDir"].get<std::string>();
+					}
+					if (ipc.contains("processingDir") && ipc["processingDir"].is_string())
+					{
+						mailbox_config_.processing_dir = ipc["processingDir"].get<std::string>();
+					}
+					if (ipc.contains("responsesDir") && ipc["responsesDir"].is_string())
+					{
+						mailbox_config_.responses_dir = ipc["responsesDir"].get<std::string>();
+					}
+					if (ipc.contains("deadDir") && ipc["deadDir"].is_string())
+					{
+						mailbox_config_.dead_dir = ipc["deadDir"].get<std::string>();
+					}
+					if (ipc.contains("staleTimeoutMs") && ipc["staleTimeoutMs"].is_number())
+					{
+						mailbox_config_.stale_timeout_ms = ipc["staleTimeoutMs"].get<int32_t>();
+					}
+					if (ipc.contains("pollIntervalMs") && ipc["pollIntervalMs"].is_number())
+					{
+						mailbox_config_.poll_interval_ms = ipc["pollIntervalMs"].get<int32_t>();
 					}
 				}
 
@@ -421,5 +511,102 @@ namespace YiRang
 
 			return policy;
 		}
-	} // namespace MQ
-} // namespace YiRang
+
+		auto Configurations::validate() -> void
+		{
+			// Validate lease timeouts
+			if (lease_visibility_timeout_sec_ <= 0)
+			{
+				Logger::handle().write(LogTypes::Information,
+					std::format("Invalid lease.visibilityTimeoutSec ({}), using default 30", lease_visibility_timeout_sec_));
+				lease_visibility_timeout_sec_ = 30;
+			}
+
+			if (lease_sweep_interval_ms_ <= 0)
+			{
+				Logger::handle().write(LogTypes::Information,
+					std::format("Invalid lease.sweepIntervalMs ({}), using default 1000", lease_sweep_interval_ms_));
+				lease_sweep_interval_ms_ = 1000;
+			}
+
+			// Validate policy defaults
+			validate_queue_policy(policy_defaults_, "policyDefaults");
+
+			// Validate queues
+			std::set<std::string> seen_names;
+			for (auto& queue : queues_)
+			{
+				if (!is_valid_queue_name(queue.name))
+				{
+					Logger::handle().write(LogTypes::Error,
+						std::format("Invalid queue name '{}': must be 1-256 alphanumeric/hyphen/underscore characters", queue.name));
+				}
+
+				if (seen_names.find(queue.name) != seen_names.end())
+				{
+					Logger::handle().write(LogTypes::Information,
+						std::format("Duplicate queue name: {}", queue.name));
+				}
+				seen_names.insert(queue.name);
+
+				validate_queue_policy(queue.policy, std::format("queue '{}'", queue.name));
+			}
+		}
+
+		auto Configurations::validate_retry_policy(RetryPolicy& policy, const std::string& context) -> void
+		{
+			if (policy.limit < 0)
+			{
+				Logger::handle().write(LogTypes::Information,
+					std::format("{}: retry.limit ({}) must be >= 0, using 0", context, policy.limit));
+				policy.limit = 0;
+			}
+
+			if (!is_valid_backoff_type(policy.backoff))
+			{
+				Logger::handle().write(LogTypes::Information,
+					std::format("{}: invalid retry.backoff '{}', using 'exponential'", context, policy.backoff));
+				policy.backoff = "exponential";
+			}
+
+			if (policy.initial_delay_sec <= 0)
+			{
+				Logger::handle().write(LogTypes::Information,
+					std::format("{}: retry.initialDelaySec ({}) must be > 0, using 1", context, policy.initial_delay_sec));
+				policy.initial_delay_sec = 1;
+			}
+
+			if (policy.max_delay_sec <= 0)
+			{
+				Logger::handle().write(LogTypes::Information,
+					std::format("{}: retry.maxDelaySec ({}) must be > 0, using 60", context, policy.max_delay_sec));
+				policy.max_delay_sec = 60;
+			}
+
+			if (policy.max_delay_sec < policy.initial_delay_sec)
+			{
+				Logger::handle().write(LogTypes::Information,
+					std::format("{}: retry.maxDelaySec ({}) < initialDelaySec ({}), swapping values",
+						context, policy.max_delay_sec, policy.initial_delay_sec));
+				std::swap(policy.max_delay_sec, policy.initial_delay_sec);
+			}
+		}
+
+		auto Configurations::validate_queue_policy(QueuePolicy& policy, const std::string& context) -> void
+		{
+			if (policy.visibility_timeout_sec <= 0)
+			{
+				Logger::handle().write(LogTypes::Information,
+					std::format("{}: visibilityTimeoutSec ({}) must be > 0, using 30", context, policy.visibility_timeout_sec));
+				policy.visibility_timeout_sec = 30;
+			}
+
+			validate_retry_policy(policy.retry, context);
+
+			if (policy.dlq.retention_days <= 0)
+			{
+				Logger::handle().write(LogTypes::Information,
+					std::format("{}: dlq.retentionDays ({}) must be > 0, using 14", context, policy.dlq.retention_days));
+				policy.dlq.retention_days = 14;
+			}
+		}

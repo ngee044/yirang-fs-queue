@@ -1,119 +1,206 @@
-#include "ArgumentParser.h"
-#include "Converter.h"
-#include "File.h"
+#include "Configurations.h"
+#include "FileSystemAdapter.h"
+#include "HybridAdapter.h"
+#include "Logger.h"
+#include "MailboxHandler.h"
+#include "QueueManager.h"
 #include "SQLiteAdapter.h"
 
-#include <filesystem>
+#include <atomic>
+#include <csignal>
+#include <format>
 #include <iostream>
-#include <optional>
+#include <memory>
 #include <string>
+#include <thread>
 
-#include <nlohmann/json.hpp>
+using namespace Utilities;
 
-using json = nlohmann::json;
+void register_signal(void);
+void deregister_signal(void);
+void signal_callback(int32_t signum);
 
-namespace
+auto create_backend_adapter(Configurations& config) -> std::tuple<std::shared_ptr<BackendAdapter>, std::optional<std::string>>;
+
+std::shared_ptr<Configurations> configurations_ = nullptr;
+std::shared_ptr<QueueManager> queue_manager_ = nullptr;
+std::shared_ptr<MailboxHandler> mailbox_handler_ = nullptr;
+std::atomic<bool> shutdown_requested_ = false;
+
+auto main(int argc, char* argv[]) -> int
 {
-	auto read_text_file(const std::string& path) -> std::tuple<std::optional<std::string>, std::optional<std::string>>
+	// Initialize Configurations
+	configurations_ = std::make_shared<Configurations>(ArgumentParser(argc, argv));
+
+	// Setup Logger from configurations
+	Logger::handle().file_mode(configurations_->write_file());
+	Logger::handle().console_mode(configurations_->write_console());
+	Logger::handle().log_root(configurations_->log_root());
+	Logger::handle().start("MainMQ");
+
+	Logger::handle().write(LogTypes::Information, "Yi-Rang MQ starting...");
+	Logger::handle().write(LogTypes::Information, std::format("Backend: {}",
+		configurations_->backend_type() == BackendType::SQLite ? "SQLite" :
+		configurations_->backend_type() == BackendType::FileSystem ? "FileSystem" : "Hybrid"));
+	Logger::handle().write(LogTypes::Information, std::format("Node ID: {}", configurations_->node_id()));
+
+	// Initialize backend adapter using factory
+	auto [adapter, factory_error] = create_backend_adapter(*configurations_);
+	if (!adapter)
 	{
-		Utilities::File source;
-		auto [opened, open_message] = source.open(path, std::ios::in | std::ios::binary);
-		if (!opened)
-		{
-			return { std::nullopt, open_message };
-		}
-
-		auto [data, read_message] = source.read_bytes();
-		source.close();
-		if (data == std::nullopt)
-		{
-			return { std::nullopt, read_message };
-		}
-
-		return { Utilities::Converter::to_string(data.value()), std::nullopt };
-	}
-
-	auto load_json(const std::string& path) -> std::tuple<std::optional<json>, std::optional<std::string>>
-	{
-		auto [text, message] = read_text_file(path);
-		if (text == std::nullopt)
-		{
-			return { std::nullopt, message };
-		}
-
-		try
-		{
-			return { json::parse(text.value()), std::nullopt };
-		}
-		catch (const std::exception& e)
-		{
-			return { std::nullopt, std::string("config parse error: ") + e.what() };
-		}
-	}
-
-	auto resolve_path(const std::filesystem::path& base, const std::string& input) -> std::string
-	{
-		if (input.empty())
-		{
-			return input;
-		}
-
-		std::filesystem::path target(input);
-		if (target.is_relative())
-		{
-			return (base / target).lexically_normal().string();
-		}
-
-		return target.lexically_normal().string();
-	}
-}
-
-int main(int argc, char* argv[])
-{
-	Utilities::ArgumentParser parser(argc, argv);
-	const std::string config_path = parser.to_string("--config").value_or(parser.program_folder() + "main_mq_configuration.json");
-
-	auto [config_json, config_message] = load_json(config_path);
-	if (config_json == std::nullopt)
-	{
-		std::cerr << "Failed to load config: " << config_message.value_or("unknown error") << std::endl;
+		Logger::handle().write(LogTypes::Error, std::format("Failed to create backend adapter: {}",
+			factory_error.value_or("unknown error")));
+		Logger::handle().stop();
+		Logger::destroy();
 		return 1;
 	}
 
-	const auto config_dir = std::filesystem::path(config_path).parent_path();
-	const auto& config = config_json.value();
-	const std::string backend = config.value("backend", "sqlite");
-	if (backend != "sqlite")
-	{
-		std::cerr << "Only sqlite backend is supported (current: " << backend << ")" << std::endl;
-		return 1;
-	}
-
-	const auto sqlite_json = config.value("sqlite", json::object());
-	std::string schema_path = sqlite_json.value("schemaPath", "");
-	if (schema_path.empty())
-	{
-		schema_path = parser.program_folder() + "sqlite_schema.sql";
-	}
-	schema_path = resolve_path(config_dir, schema_path);
-
-	YiRang::MQ::BackendConfig backend_config;
-	backend_config.type = YiRang::MQ::BackendType::SQLite;
-	backend_config.sqlite.db_path = resolve_path(config_dir, sqlite_json.value("dbPath", "./data/yirangmq.db"));
-	backend_config.sqlite.kv_table = sqlite_json.value("kvTable", "kv");
-	backend_config.sqlite.message_index_table = sqlite_json.value("messageIndexTable", "msg_index");
-	backend_config.sqlite.busy_timeout_ms = sqlite_json.value("busyTimeoutMs", 5000);
-	backend_config.sqlite.journal_mode = sqlite_json.value("journalMode", "WAL");
-	backend_config.sqlite.synchronous = sqlite_json.value("synchronous", "NORMAL");
-
-	YiRang::MQ::SQLiteAdapter adapter(schema_path);
-	auto [opened, open_message] = adapter.open(backend_config);
+	auto [opened, open_error] = adapter->open(configurations_->backend_config());
 	if (!opened)
 	{
-		std::cerr << "Failed to initialize sqlite backend: " << open_message.value_or("unknown error") << std::endl;
+		Logger::handle().write(LogTypes::Error, std::format("Failed to initialize backend: {}",
+			open_error.value_or("unknown error")));
+		Logger::handle().stop();
+		Logger::destroy();
 		return 1;
 	}
 
-	std::cout << "MainMQ initialized (SQLite schema applied)." << std::endl;
+	Logger::handle().write(LogTypes::Information, "Backend initialized successfully");
+
+	// Register queues from configuration
+	for (auto& queue_config : configurations_->queues())
+	{
+		auto [saved, save_error] = adapter->save_policy(queue_config.name, queue_config.policy);
+		if (saved)
+		{
+			Logger::handle().write(LogTypes::Information, std::format("Registered queue: {}", queue_config.name));
+		}
+		else
+		{
+			Logger::handle().write(LogTypes::Error, std::format("Failed to register queue {}: {}",
+				queue_config.name, save_error.value_or("unknown")));
+		}
+	}
+
+	// Initialize QueueManager
+	QueueManagerConfig mgr_config;
+	mgr_config.lease_sweep_interval_ms = configurations_->lease_sweep_interval_ms();
+	mgr_config.retry_sweep_interval_ms = 1000; // Default 1s
+
+	queue_manager_ = std::make_shared<QueueManager>(adapter, mgr_config);
+
+	// Register queues with manager
+	for (auto& queue_config : configurations_->queues())
+	{
+		queue_manager_->register_queue(queue_config.name, queue_config.policy);
+	}
+
+	// Start QueueManager
+	auto [started, start_error] = queue_manager_->start();
+	if (!started)
+	{
+		Logger::handle().write(LogTypes::Error, std::format("Failed to start QueueManager: {}",
+			start_error.value_or("unknown error")));
+		queue_manager_.reset();
+		configurations_.reset();
+		Logger::handle().stop();
+		Logger::destroy();
+		return 1;
+	}
+
+	// Initialize and start MailboxHandler
+	mailbox_handler_ = std::make_shared<MailboxHandler>(
+		adapter,
+		queue_manager_,
+		configurations_->mailbox_config()
+	);
+
+	auto [mailbox_started, mailbox_error] = mailbox_handler_->start();
+	if (!mailbox_started)
+	{
+		Logger::handle().write(LogTypes::Error, std::format("Failed to start MailboxHandler: {}",
+			mailbox_error.value_or("unknown error")));
+		queue_manager_->stop();
+		queue_manager_.reset();
+		configurations_.reset();
+		Logger::handle().stop();
+		Logger::destroy();
+		return 1;
+	}
+
+	Logger::handle().write(LogTypes::Information, std::format("Operation mode: {}",
+		configurations_->operation_mode() == OperationMode::MailboxSqlite ? "mailbox_sqlite" :
+		configurations_->operation_mode() == OperationMode::MailboxFileSystem ? "mailbox_fs" : "hybrid"));
+
+	// Setup signal handlers
+	register_signal();
+
+	Logger::handle().write(LogTypes::Information, "Yi-Rang MQ is running. Press Ctrl+C to stop.");
+
+	// Keep running until shutdown requested
+	while (!shutdown_requested_.load())
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+
+	// Stop MailboxHandler gracefully
+	if (mailbox_handler_)
+	{
+		mailbox_handler_->stop();
+		mailbox_handler_.reset();
+	}
+
+	// Stop QueueManager gracefully
+	if (queue_manager_)
+	{
+		queue_manager_->stop();
+		queue_manager_.reset();
+	}
+
+	// Cleanup
+	configurations_.reset();
+
+	Logger::handle().write(LogTypes::Information, "Yi-Rang MQ stopped.");
+	Logger::handle().stop();
+	Logger::destroy();
+
 	return 0;
+}
+
+void register_signal(void)
+{
+	signal(SIGINT, signal_callback);
+	signal(SIGTERM, signal_callback);
+}
+
+void deregister_signal(void)
+{
+	signal(SIGINT, nullptr);
+	signal(SIGTERM, nullptr);
+}
+
+void signal_callback(int32_t signum)
+{
+	deregister_signal();
+
+	// Use atomic flag for async-signal-safe shutdown request
+	shutdown_requested_.store(true);
+}
+
+auto create_backend_adapter(Configurations& config) -> std::tuple<std::shared_ptr<BackendAdapter>, std::optional<std::string>>
+{
+	switch (config.backend_type())
+	{
+	case BackendType::SQLite:
+		return { std::make_shared<SQLiteAdapter>(config.sqlite_schema_path()), std::nullopt };
+
+	case BackendType::FileSystem:
+		return { std::make_shared<FileSystemAdapter>(), std::nullopt };
+
+	case BackendType::Hybrid:
+		return { std::make_shared<HybridAdapter>(config.sqlite_schema_path()), std::nullopt };
+
+	default:
+		return { nullptr, "Unknown backend type" };
+	}
 }

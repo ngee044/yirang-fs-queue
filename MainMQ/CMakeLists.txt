@@ -11,10 +11,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 set(SOURCE_FILES
 	main.cpp
 	Configurations.cpp
+	QueueManager.cpp
+	MessageValidator.cpp
+	MailboxHandler.cpp
 )
 
 set(HEADER_FILES
 	Configurations.h
+	QueueManager.h
+	MessageValidator.h
+	MailboxHandler.h
+	MailboxTypes.h
 )
 
 project(${PROGRAM_NAME} VERSION 1.0.0.0)
@@ -32,6 +39,7 @@ target_include_directories(${PROGRAM_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
 
 set(RESOURCE_FILES
 	main_mq_configuration.json
+	sqlite_schema.sql
 )
 
 foreach(RESOURCE_FILE IN LISTS RESOURCE_FILES)
