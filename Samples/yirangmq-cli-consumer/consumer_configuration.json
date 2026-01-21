@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "0.1",
+
+  "ipc": {
+    "root": "./ipc",
+    "requestsDir": "requests",
+    "responsesDir": "responses",
+    "timeoutMs": 30000
+  },
+
+  "consumer": {
+    "queue": "telemetry",
+    "consumerId": "worker-01",
+    "visibilityTimeoutSec": 30
+  },
+
+  "logging": {
+    "writeConsole": 3,
+    "writeFile": 0,
+    "logRoot": "./logs"
+  }
+}

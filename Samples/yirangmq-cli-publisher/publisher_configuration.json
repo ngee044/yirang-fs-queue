@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "0.1",
+
+  "ipc": {
+    "root": "./ipc",
+    "requestsDir": "requests",
+    "responsesDir": "responses",
+    "timeoutMs": 30000
+  },
+
+  "publisher": {
+    "queue": "telemetry",
+    "target": "",
+    "priority": 0
+  },
+
+  "logging": {
+    "writeConsole": 3,
+    "writeFile": 0,
+    "logRoot": "./logs"
+  },
+
+  "clientId": "publisher-01"
+}
