@@ -6,6 +6,15 @@
     "dataRoot": "./data",
     "logRoot": "./logs"
   },
+  "ipc": {
+    "root": "./ipc",
+    "requestsDir": "requests",
+    "processingDir": "processing",
+    "responsesDir": "responses",
+    "deadDir": "dead",
+    "staleTimeoutMs": 30000,
+    "pollIntervalMs": 100
+  },
   "sqlite": {
     "dbPath": "./data/yirangmq.db",
     "kvTable": "kv",
