@@ -19,24 +19,41 @@ print_usage() {
     echo ""
     echo "Usage: $0 <command> [options]"
     echo ""
-    echo "Commands:"
+    echo "Service Commands:"
     echo "  up        Start services (builds if needed)"
     echo "  down      Stop and remove services"
     echo "  build     Build/rebuild images"
     echo "  logs      Show service logs"
     echo "  status    Show service status"
-    echo "  cli       Open CLI shell (interactive)"
-    echo "  publish   Publish a test message"
-    echo "  consume   Consume a message"
-    echo "  health    Check service health"
     echo "  clean     Remove all containers, images, volumes"
     echo ""
+    echo "Publisher Commands:"
+    echo "  publish   Publish a message to a queue"
+    echo "  health    Check service health"
+    echo "  metrics   Get server metrics"
+    echo "  queue-status  Get queue status"
+    echo ""
+    echo "Consumer Commands:"
+    echo "  consume   Consume a message from a queue"
+    echo "  ack       Acknowledge a message"
+    echo "  nack      Negative acknowledge a message"
+    echo "  list-dlq  List messages in dead letter queue"
+    echo "  reprocess Reprocess a DLQ message"
+    echo ""
+    echo "Interactive:"
+    echo "  cli       Open CLI shell (interactive)"
+    echo ""
     echo "Examples:"
-    echo "  $0 up                    # Start service"
-    echo "  $0 logs -f               # Follow logs"
-    echo "  $0 cli                   # Interactive CLI"
+    echo "  $0 up                                    # Start service"
+    echo "  $0 logs -f                              # Follow logs"
     echo "  $0 publish telemetry '{\"temp\":25.5}'"
+    echo "  $0 publish telemetry '{\"temp\":25.5}' --target worker-01"
     echo "  $0 consume telemetry"
+    echo "  $0 ack msg:telemetry:abc123"
+    echo "  $0 nack msg:telemetry:abc123 --reason 'error' --requeue"
+    echo "  $0 list-dlq telemetry"
+    echo "  $0 reprocess msg:telemetry:abc123"
+    echo "  $0 queue-status telemetry"
     echo ""
 }
 
@@ -70,7 +87,7 @@ case "${1:-help}" in
         docker compose ps
         echo ""
         log_info "Health check:"
-        docker compose exec yirangmq /app/yirangmq-cli health 2>/dev/null || log_warn "Service not running"
+        docker compose exec yirangmq /app/yirangmq-cli-publisher health 2>/dev/null || log_warn "Service not running"
         ;;
 
     cli)
@@ -78,21 +95,71 @@ case "${1:-help}" in
         docker compose run --rm yirangmq-cli
         ;;
 
+    # Publisher commands
     publish)
         QUEUE="${2:-telemetry}"
         MESSAGE="${3:-{\"test\":true}}"
+        shift 3 2>/dev/null || true
         log_info "Publishing to queue: $QUEUE"
-        docker compose exec yirangmq /app/yirangmq-cli publish --queue "$QUEUE" --message "$MESSAGE"
-        ;;
-
-    consume)
-        QUEUE="${2:-telemetry}"
-        log_info "Consuming from queue: $QUEUE"
-        docker compose exec yirangmq /app/yirangmq-cli consume --queue "$QUEUE" --consumer-id "docker-cli"
+        docker compose exec yirangmq /app/yirangmq-cli-publisher --queue "$QUEUE" --message "$MESSAGE" "$@"
         ;;
 
     health)
-        docker compose exec yirangmq /app/yirangmq-cli health
+        docker compose exec yirangmq /app/yirangmq-cli-publisher health
+        ;;
+
+    metrics)
+        docker compose exec yirangmq /app/yirangmq-cli-publisher metrics
+        ;;
+
+    queue-status)
+        QUEUE="${2:-telemetry}"
+        docker compose exec yirangmq /app/yirangmq-cli-publisher status --queue "$QUEUE"
+        ;;
+
+    # Consumer commands
+    consume)
+        QUEUE="${2:-telemetry}"
+        CONSUMER_ID="${3:-docker-consumer}"
+        log_info "Consuming from queue: $QUEUE"
+        docker compose exec yirangmq /app/yirangmq-cli-consumer consume --queue "$QUEUE" --consumer-id "$CONSUMER_ID"
+        ;;
+
+    ack)
+        MESSAGE_KEY="${2}"
+        if [ -z "$MESSAGE_KEY" ]; then
+            log_error "Usage: $0 ack <message-key>"
+            exit 1
+        fi
+        log_info "Acknowledging message: $MESSAGE_KEY"
+        docker compose exec yirangmq /app/yirangmq-cli-consumer ack --message-key "$MESSAGE_KEY"
+        ;;
+
+    nack)
+        MESSAGE_KEY="${2}"
+        if [ -z "$MESSAGE_KEY" ]; then
+            log_error "Usage: $0 nack <message-key> [--reason 'text'] [--requeue]"
+            exit 1
+        fi
+        shift 2
+        log_info "Nacking message: $MESSAGE_KEY"
+        docker compose exec yirangmq /app/yirangmq-cli-consumer nack --message-key "$MESSAGE_KEY" "$@"
+        ;;
+
+    list-dlq)
+        QUEUE="${2:-telemetry}"
+        log_info "Listing DLQ for queue: $QUEUE"
+        docker compose exec yirangmq /app/yirangmq-cli-consumer list-dlq --queue "$QUEUE"
+        ;;
+
+    reprocess)
+        MESSAGE_KEY="${2}"
+        if [ -z "$MESSAGE_KEY" ]; then
+            log_error "Usage: $0 reprocess <message-key>"
+            exit 1
+        fi
+        log_info "Reprocessing DLQ message: $MESSAGE_KEY"
+        docker compose exec yirangmq /app/yirangmq-cli-consumer reprocess --message-key "$MESSAGE_KEY"
         ;;
 
     clean)

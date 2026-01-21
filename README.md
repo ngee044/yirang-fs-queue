@@ -66,10 +66,11 @@ cd yirang-mq/docker
 # 터미널 1: 데몬 실행
 ./build/out/MainMQ
 
-# 터미널 2: CLI 테스트
-./build/out/yirangmq-cli health
-./build/out/yirangmq-cli publish --queue telemetry --message '{"temp":25.5}'
-./build/out/yirangmq-cli consume --queue telemetry --consumer-id worker-01
+# 터미널 2: 메시지 발행
+./build/out/yirangmq-cli-publisher --message '{"temp":25.5}'
+
+# 터미널 3: 메시지 소비
+./build/out/yirangmq-cli-consumer
 ```
 
 ---
@@ -118,92 +119,218 @@ ipc/
 - **Retry with Backoff**: exponential/linear/fixed 백오프
 - **Dead Letter Queue**: 재시도 한도 초과 메시지 격리
 
+### 4. Direct Addressing
+
+특정 Consumer에게만 메시지를 전달할 수 있습니다:
+
+```bash
+# 일반 발행 (아무 Consumer나 처리)
+yirangmq-cli-publisher --message '{"temp":36.5}'
+
+# Direct Addressing (특정 Consumer만 처리)
+yirangmq-cli-publisher --message '{"temp":36.5}' --target worker-01
+```
+
+| target 옵션 | 동작 |
+|-------------|------|
+| 미지정 | 아무 Consumer나 메시지 수신 가능 |
+| `--target worker-01` | `consumer-id=worker-01`인 Consumer만 수신 |
+
 ---
 
-## 사용법
+## 로컬 테스트 가이드
 
-### Docker 환경
+### 1. 빌드
 
 ```bash
-cd docker
+# Release 빌드
+./build.sh
 
-# 서비스 관리
-./docker-compose.sh up          # 시작
-./docker-compose.sh down        # 중지
-./docker-compose.sh logs -f     # 로그 확인
-./docker-compose.sh status      # 상태 확인
-
-# 메시지 조작
-./docker-compose.sh health
-./docker-compose.sh publish <queue> '<json>'
-./docker-compose.sh consume <queue>
-
-# 컨테이너 내부 CLI
-docker exec yirangmq /app/yirangmq-cli status --queue telemetry
-docker exec yirangmq /app/yirangmq-cli ack --lease-id <id> --message-key <key>
+# 빌드 결과 확인
+ls -la build/out/
+# MainMQ                    - 메시지 큐 데몬
+# yirangmq-cli-publisher    - Publisher CLI
+# yirangmq-cli-consumer     - Consumer CLI
+# *.json                    - 설정 파일
 ```
 
-### 로컬 환경
+### 2. 데몬 실행 (터미널 1)
 
-**터미널 1: MainMQ 데몬**
 ```bash
-./build/out/MainMQ
+cd build/out
+./MainMQ
 ```
 
-**터미널 2: yirangmq-cli**
+출력 예시:
+```
+[START]
+[INFORMATION] Yi-Rang MQ starting...
+[INFORMATION] Backend: sqlite
+[INFORMATION] IPC root: ./ipc
+[INFORMATION] Mailbox handler started
+```
+
+### 3. Publisher 테스트 (터미널 2)
+
 ```bash
+cd build/out
+
 # 헬스 체크
-./build/out/yirangmq-cli health
+./yirangmq-cli-publisher health
 
-# 메시지 발행
-./build/out/yirangmq-cli publish \
-  --queue telemetry \
-  --message '{"sensor":"A1","temp":25.5}' \
-  --priority 5
+# 메시지 발행 (기본 - publish 명령 없이 바로 사용)
+./yirangmq-cli-publisher --message '{"sensor":"temp","value":25.5}'
 
-# 메시지 소비 (lease 획득)
-./build/out/yirangmq-cli consume \
-  --queue telemetry \
-  --consumer-id worker-01
+# 큐 지정 발행
+./yirangmq-cli-publisher --queue telemetry --message '{"sensor":"humidity","value":65}'
 
-# 처리 성공 → ACK
-./build/out/yirangmq-cli ack \
-  --lease-id <leaseId> \
-  --message-key <messageKey>
+# 특정 Consumer에게만 발행 (Direct Addressing)
+./yirangmq-cli-publisher --message '{"alert":"high"}' --target worker-01
 
-# 처리 실패 → NACK (재시도)
-./build/out/yirangmq-cli nack \
-  --lease-id <leaseId> \
-  --message-key <messageKey> \
-  --reason "parse error" \
-  --requeue
+# 우선순위 지정 (0이 가장 높음)
+./yirangmq-cli-publisher --message '{"urgent":true}' --priority 0
+
+# 지연 발행 (5초 후 ready 상태)
+./yirangmq-cli-publisher --message '{"scheduled":true}' --delay 5000
 
 # 큐 상태 확인
-./build/out/yirangmq-cli status --queue telemetry
+./yirangmq-cli-publisher status --queue telemetry
 
-# DLQ 조회
-./build/out/yirangmq-cli list-dlq --queue telemetry
+# 서버 메트릭 조회
+./yirangmq-cli-publisher metrics
 
-# DLQ 메시지 재처리
-./build/out/yirangmq-cli reprocess --message-key <key>
-
-# 메트릭
-./build/out/yirangmq-cli metrics
+# 도움말
+./yirangmq-cli-publisher help
 ```
 
-### CLI 옵션
+### 4. Consumer 테스트 (터미널 3)
+
+```bash
+cd build/out
+
+# 메시지 소비 (기본 - consume 명령 없이 바로 사용)
+./yirangmq-cli-consumer
+
+# 큐 지정 소비
+./yirangmq-cli-consumer consume --queue telemetry
+
+# Consumer ID 지정
+./yirangmq-cli-consumer consume --queue telemetry --consumer-id worker-01
+
+# 도움말
+./yirangmq-cli-consumer help
+```
+
+### 5. ACK/NACK 테스트
+
+메시지 소비 후 받은 `messageKey`를 사용합니다:
+
+```bash
+# 소비 결과 예시:
+# {
+#   "lease": {
+#     "messageKey": "msg:telemetry:ABC123",
+#     "leaseId": "LEASE-XYZ"
+#   },
+#   "message": { ... }
+# }
+
+# 처리 성공 → ACK (메시지 삭제)
+./yirangmq-cli-consumer ack --message-key msg:telemetry:ABC123
+
+# 처리 실패 → NACK (재시도 또는 DLQ)
+./yirangmq-cli-consumer nack --message-key msg:telemetry:ABC123 --reason "DB error" --requeue
+```
+
+### 6. DLQ (Dead Letter Queue) 테스트
+
+```bash
+# DLQ 메시지 목록 조회
+./yirangmq-cli-consumer list-dlq --queue telemetry
+
+# DLQ 메시지 재처리
+./yirangmq-cli-consumer reprocess --message-key msg:telemetry:ABC123
+```
+
+### 7. 전체 시나리오 테스트
+
+```bash
+cd build/out
+
+# 터미널 1: MainMQ 실행
+./MainMQ
+
+# 터미널 2: Publisher
+./yirangmq-cli-publisher --message '{"test":1}'
+./yirangmq-cli-publisher --message '{"test":2}'
+./yirangmq-cli-publisher --message '{"test":3}'
+./yirangmq-cli-publisher status
+
+# 터미널 3: Consumer
+./yirangmq-cli-consumer                              # 메시지 1 수신
+./yirangmq-cli-consumer ack --message-key <key1>     # ACK
+
+./yirangmq-cli-consumer                              # 메시지 2 수신
+./yirangmq-cli-consumer nack --message-key <key2> --reason "error" --requeue  # NACK
+
+./yirangmq-cli-consumer                              # 메시지 3 수신
+# (30초 후 자동 복구 - ACK/NACK 없이 timeout)
+
+# 상태 확인
+./yirangmq-cli-publisher status
+./yirangmq-cli-consumer list-dlq
+```
+
+---
+
+## CLI 옵션
+
+### yirangmq-cli-publisher
+
+| 명령 | 설명 |
+|------|------|
+| (기본) | 메시지 발행 (publish와 동일) |
+| `status` | 큐 상태 조회 |
+| `health` | 서버 헬스 체크 |
+| `metrics` | 서버 메트릭 조회 |
+| `help` | 도움말 표시 |
 
 | 옵션 | 설명 | 기본값 |
 |------|------|--------|
-| `--ipc-root` | IPC 폴더 경로 | `./ipc` |
-| `--timeout` | 응답 대기 시간 (ms) | `30000` |
-| `--priority` | 메시지 우선순위 | `0` |
+| `--message <json>` | 메시지 페이로드 (필수) | - |
+| `--queue <name>` | 큐 이름 | 설정 파일 값 |
+| `--target <id>` | 대상 Consumer ID | 미지정 (모두) |
+| `--priority <n>` | 우선순위 (0이 최고) | 0 |
+| `--delay <ms>` | 지연 시간 (ms) | 0 |
+| `--ipc-root <path>` | IPC 폴더 경로 | ./ipc |
+| `--timeout <ms>` | 응답 대기 시간 | 30000 |
+
+### yirangmq-cli-consumer
+
+| 명령 | 설명 |
+|------|------|
+| (기본) | 메시지 소비 (consume와 동일) |
+| `consume` | 메시지 소비 |
+| `ack` | 메시지 처리 완료 확인 |
+| `nack` | 메시지 처리 실패 알림 |
+| `list-dlq` | DLQ 메시지 목록 |
+| `reprocess` | DLQ 메시지 재처리 |
+| `help` | 도움말 표시 |
+
+| 옵션 | 설명 | 기본값 |
+|------|------|--------|
+| `--queue <name>` | 큐 이름 | 설정 파일 값 |
+| `--consumer-id <id>` | Consumer ID | 설정 파일 값 |
+| `--message-key <key>` | 메시지 키 (ack/nack 필수) | - |
+| `--reason <text>` | NACK 사유 | 빈 문자열 |
+| `--requeue` | NACK 시 재시도 여부 | false |
+| `--visibility <sec>` | Visibility timeout | 30 |
 
 ---
 
-## 설정
+## 설정 파일
 
-### main_mq_configuration.json
+### MainMQ (main_mq_configuration.json)
 
 ```json
 {
@@ -218,6 +345,8 @@ docker exec yirangmq /app/yirangmq-cli ack --lease-id <id> --message-key <key>
 
   "ipc": {
     "root": "./ipc",
+    "requestsDir": "requests",
+    "responsesDir": "responses",
     "pollIntervalMs": 100,
     "staleTimeoutMs": 30000
   },
@@ -249,6 +378,53 @@ docker exec yirangmq /app/yirangmq-cli ack --lease-id <id> --message-key <key>
 }
 ```
 
+### Publisher (publisher_configuration.json)
+
+```json
+{
+  "ipc": {
+    "root": "./ipc",
+    "requestsDir": "requests",
+    "responsesDir": "responses",
+    "timeoutMs": 30000
+  },
+  "publisher": {
+    "queue": "telemetry",
+    "target": "",
+    "priority": 0
+  },
+  "logging": {
+    "writeConsole": 3,
+    "writeFile": 0,
+    "logRoot": "./logs"
+  },
+  "clientId": "publisher-01"
+}
+```
+
+### Consumer (consumer_configuration.json)
+
+```json
+{
+  "ipc": {
+    "root": "./ipc",
+    "requestsDir": "requests",
+    "responsesDir": "responses",
+    "timeoutMs": 30000
+  },
+  "consumer": {
+    "queue": "telemetry",
+    "consumerId": "worker-01",
+    "visibilityTimeoutSec": 30
+  },
+  "logging": {
+    "writeConsole": 3,
+    "writeFile": 0,
+    "logRoot": "./logs"
+  }
+}
+```
+
 ### 백엔드 선택
 
 ```json
@@ -260,6 +436,37 @@ docker exec yirangmq /app/yirangmq-cli ack --lease-id <id> --message-key <key>
 
 // Hybrid (SQLite 인덱스 + 파일 payload)
 "backend": "hybrid"
+```
+
+---
+
+## Docker 사용법
+
+```bash
+cd docker
+
+# 서비스 관리
+./docker-compose.sh up          # 시작
+./docker-compose.sh down        # 중지
+./docker-compose.sh logs -f     # 로그 확인
+./docker-compose.sh status      # 상태 확인
+
+# Publisher 명령
+./docker-compose.sh publish telemetry '{"temp":25.5}'
+./docker-compose.sh publish telemetry '{"temp":25.5}' --target worker-01
+./docker-compose.sh health
+./docker-compose.sh metrics
+./docker-compose.sh queue-status telemetry
+
+# Consumer 명령
+./docker-compose.sh consume telemetry
+./docker-compose.sh ack msg:telemetry:abc123
+./docker-compose.sh nack msg:telemetry:abc123 --reason "error" --requeue
+./docker-compose.sh list-dlq telemetry
+./docker-compose.sh reprocess msg:telemetry:abc123
+
+# 정리
+./docker-compose.sh clean
 ```
 
 ---
@@ -295,7 +502,7 @@ docker exec yirangmq /app/yirangmq-cli ack --lease-id <id> --message-key <key>
 ### 메시지 흐름
 
 ```
-Producer                 MainMQ                    Backend
+Publisher                MainMQ                    Backend
    │                        │                         │
    │ 1. Request JSON 작성    │                         │
    │ ──────────────────────>│                         │
@@ -371,9 +578,10 @@ Consumer                 MainMQ                    Backend
 ```
 build/
 ├── out/
-│   ├── MainMQ              # 데몬 서비스
-│   ├── yirangmq-cli        # CLI 클라이언트
-│   └── *.json              # 설정 파일
+│   ├── MainMQ                  # 데몬 서비스
+│   ├── yirangmq-cli-publisher  # Publisher CLI
+│   ├── yirangmq-cli-consumer   # Consumer CLI
+│   └── *.json                  # 설정 파일
 └── lib/
     ├── libBackendAdapter.a
     ├── libUtilities.a
@@ -432,29 +640,30 @@ cd docker
 
 ```
 yirang-mq/
-├── MainMQ/                    # 데몬 서비스
-│   ├── BackendAdapter/        # 스토리지 백엔드
-│   │   ├── BackendAdapter.h   # 추상 인터페이스
-│   │   ├── SQLiteAdapter.*    # SQLite 구현
-│   │   ├── FileSystemAdapter.*# FileSystem 구현
-│   │   └── HybridAdapter.*    # Hybrid 구현
-│   ├── MailboxHandler.*       # IPC 처리
-│   ├── QueueManager.*         # Lease/Retry 관리
-│   ├── Configurations.*       # 설정 로더
-│   └── main.cpp               # 진입점
+├── MainMQ/                       # 데몬 서비스
+│   ├── BackendAdapter/           # 스토리지 백엔드
+│   │   ├── BackendAdapter.h      # 추상 인터페이스
+│   │   ├── SQLiteAdapter.*       # SQLite 구현
+│   │   ├── FileSystemAdapter.*   # FileSystem 구현
+│   │   └── HybridAdapter.*       # Hybrid 구현
+│   ├── MailboxHandler.*          # IPC 처리
+│   ├── QueueManager.*            # Lease/Retry 관리
+│   ├── Configurations.*          # 설정 로더
+│   └── main.cpp                  # 진입점
 ├── Samples/
-│   └── yirangmq-cli/          # CLI 클라이언트
-├── CommonLibrary/             # 공용 라이브러리
-│   ├── Utilities/             # Logger, File, JSON 등
-│   ├── DataBase/              # SQLite 래퍼
-│   └── ThreadPool/            # 스레드풀
-├── docker/                    # Docker 설정
+│   ├── yirangmq-cli-publisher/   # Publisher CLI
+│   └── yirangmq-cli-consumer/    # Consumer CLI
+├── CommonLibrary/                # 공용 라이브러리
+│   ├── Utilities/                # Logger, File, JSON 등
+│   ├── DataBase/                 # SQLite 래퍼
+│   └── ThreadPool/               # 스레드풀
+├── docker/                       # Docker 설정
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── docker-compose.sh
-└── docs/                      # 문서
-    ├── OPERATIONS.md          # 운영 가이드
-    └── TROUBLESHOOTING.md     # 장애 대응
+└── docs/                         # 문서
+    ├── OPERATIONS.md             # 운영 가이드
+    └── TROUBLESHOOTING.md        # 장애 대응
 ```
 
 ---

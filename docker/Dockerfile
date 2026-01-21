@@ -62,7 +62,8 @@ WORKDIR /app
 
 # Copy built executables and config files
 COPY --from=builder /app/build/out/MainMQ /app/
-COPY --from=builder /app/build/out/yirangmq-cli /app/
+COPY --from=builder /app/build/out/yirangmq-cli-publisher /app/
+COPY --from=builder /app/build/out/yirangmq-cli-consumer /app/
 COPY --from=builder /app/build/out/*.json /app/
 COPY --from=builder /app/MainMQ/sqlite_schema.sql /app/
 
@@ -76,7 +77,7 @@ VOLUME ["/app/data", "/app/logs", "/app/ipc"]
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD /app/yirangmq-cli health --timeout 5 || exit 1
+    CMD /app/yirangmq-cli-publisher health --timeout 5000 || exit 1
 
 # Default command
 CMD ["/app/MainMQ"]
