@@ -276,14 +276,15 @@ auto HybridAdapter::enqueue(const MessageEnvelope& message) -> std::tuple<bool, 
 	}
 
 	std::string insert_idx = std::format(
-		"INSERT INTO {} (queue, state, priority, available_at, lease_until, attempt, message_key) "
-		"VALUES ('{}', '{}', {}, {}, NULL, {}, '{}')",
+		"INSERT INTO {} (queue, state, priority, available_at, lease_until, attempt, target_consumer_id, message_key) "
+		"VALUES ('{}', '{}', {}, {}, NULL, {}, '{}', '{}')",
 		sqlite_config_.message_index_table,
 		message.queue,
 		state,
 		message.priority,
 		message.available_at_ms,
 		message.attempt,
+		message.target_consumer_id,
 		message.key
 	);
 
@@ -334,10 +335,12 @@ auto HybridAdapter::lease_next(const std::string& queue, const std::string& cons
 	std::string select_sql = std::format(
 		"SELECT message_key, attempt FROM {} "
 		"WHERE queue = '{}' AND state = 'ready' AND available_at <= {} "
+		"AND (target_consumer_id = '' OR target_consumer_id = '{}') "
 		"ORDER BY priority DESC, available_at ASC LIMIT 1",
 		sqlite_config_.message_index_table,
 		queue,
-		now
+		now,
+		consumer_id
 	);
 
 	auto [query_result, query_error] = db_.query(select_sql);

@@ -82,6 +82,7 @@ struct MessageEnvelope
 	int32_t attempt = 0;
 	int64_t created_at_ms = 0;
 	int64_t available_at_ms = 0;
+	std::string target_consumer_id;  // empty = any consumer, value = specific consumer only
 };
 
 struct LeaseToken

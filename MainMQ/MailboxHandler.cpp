@@ -552,6 +552,7 @@ auto MailboxHandler::handle_publish(const MailboxRequest& request) -> MailboxRes
 		envelope.attributes_json = payload.value("attributes", "{}");
 		envelope.priority = payload.value("priority", 0);
 		envelope.created_at_ms = current_time_ms();
+		envelope.target_consumer_id = payload.value("targetConsumerId", "");
 
 		int64_t delay_ms = payload.value("delayMs", static_cast<int64_t>(0));
 		envelope.available_at_ms = envelope.created_at_ms + delay_ms;

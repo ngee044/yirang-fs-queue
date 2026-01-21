@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS {{msg_index_table}} (
     attempt INTEGER NOT NULL DEFAULT 0,
     dlq_reason TEXT,
     dlq_at INTEGER,
+    target_consumer_id TEXT NOT NULL DEFAULT '',
     message_key TEXT NOT NULL REFERENCES {{kv_table}}(key) ON DELETE CASCADE,
     PRIMARY KEY (message_key)
 );
@@ -32,3 +33,4 @@ CREATE INDEX IF NOT EXISTS idx_msg_ready ON {{msg_index_table}}(queue, state, av
 CREATE INDEX IF NOT EXISTS idx_msg_lease ON {{msg_index_table}}(state, lease_until) WHERE state = 'inflight';
 CREATE INDEX IF NOT EXISTS idx_msg_delayed ON {{msg_index_table}}(state, available_at) WHERE state = 'delayed';
 CREATE INDEX IF NOT EXISTS idx_msg_dlq ON {{msg_index_table}}(queue, state) WHERE state = 'dlq';
+CREATE INDEX IF NOT EXISTS idx_msg_target ON {{msg_index_table}}(queue, state, target_consumer_id, available_at) WHERE state = 'ready';

@@ -63,6 +63,7 @@ struct PublishPayload
 	int32_t priority = 0;
 	int64_t delay_ms = 0;
 	std::string attributes_json;
+	std::string target_consumer_id;  // empty = any consumer, value = specific consumer only
 };
 
 // ConsumeNext command payload

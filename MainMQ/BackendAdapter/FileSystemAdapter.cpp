@@ -194,32 +194,49 @@ auto FileSystemAdapter::lease_next(const std::string& queue, const std::string& 
 		return result;
 	}
 
-	// Get the first file (oldest)
-	auto& file_path = files.front();
+	// Find a message that matches the consumer_id filter
+	// (empty target_consumer_id = any consumer, otherwise must match exactly)
+	std::string matched_file_path;
+	std::optional<MessageEnvelope> matched_envelope;
 
-	// Read and parse the message
-	auto [content, read_error] = read_file(file_path);
-	if (!content.has_value())
+	for (const auto& file_path : files)
 	{
-		result.error = read_error;
+		auto [content, read_error] = read_file(file_path);
+		if (!content.has_value())
+		{
+			continue;
+		}
+
+		auto [envelope_opt, parse_error] = deserialize_envelope(content.value(), file_path);
+		if (!envelope_opt.has_value())
+		{
+			continue;
+		}
+
+		auto& envelope = envelope_opt.value();
+
+		// Check target_consumer_id filter
+		if (envelope.target_consumer_id.empty() || envelope.target_consumer_id == consumer_id)
+		{
+			matched_file_path = file_path;
+			matched_envelope = envelope;
+			break;
+		}
+	}
+
+	if (!matched_envelope.has_value())
+	{
 		return result;
 	}
 
-	auto [envelope_opt, parse_error] = deserialize_envelope(content.value(), file_path);
-	if (!envelope_opt.has_value())
-	{
-		result.error = parse_error;
-		return result;
-	}
-
-	auto& envelope = envelope_opt.value();
+	auto& envelope = matched_envelope.value();
 
 	// Move to processing
-	std::filesystem::path src_path(file_path);
+	std::filesystem::path src_path(matched_file_path);
 	auto filename = src_path.filename().string();
 	auto processing_path = build_queue_path(queue, fs_config_.processing_dir, filename);
 
-	auto [moved, move_error] = move_file(file_path, processing_path);
+	auto [moved, move_error] = move_file(matched_file_path, processing_path);
 	if (!moved)
 	{
 		result.error = move_error;
@@ -249,7 +266,7 @@ auto FileSystemAdapter::lease_next(const std::string& queue, const std::string& 
 	if (!meta_ok)
 	{
 		// Rollback: move back to inbox
-		move_file(processing_path, file_path);
+		move_file(processing_path, matched_file_path);
 		result.error = meta_error;
 		return result;
 	}
@@ -988,6 +1005,7 @@ auto FileSystemAdapter::serialize_envelope(const MessageEnvelope& envelope) -> s
 	j["attempt"] = envelope.attempt;
 	j["createdAt"] = envelope.created_at_ms;
 	j["availableAt"] = envelope.available_at_ms;
+	j["targetConsumerId"] = envelope.target_consumer_id;
 	return j.dump(2);
 }
 
@@ -1008,6 +1026,7 @@ auto FileSystemAdapter::deserialize_envelope(const std::string& json_content, co
 		envelope.attempt = j.value("attempt", 0);
 		envelope.created_at_ms = j.value("createdAt", static_cast<int64_t>(0));
 		envelope.available_at_ms = j.value("availableAt", static_cast<int64_t>(0));
+		envelope.target_consumer_id = j.value("targetConsumerId", "");
 
 		return { envelope, std::nullopt };
 	}

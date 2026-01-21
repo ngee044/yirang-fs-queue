@@ -192,7 +192,7 @@ auto SQLiteAdapter::enqueue(const MessageEnvelope& message) -> std::tuple<bool, 
 
 	// Insert into msg_index table
 	std::string idx_sql = std::format(
-		"INSERT INTO {} (queue, state, priority, available_at, attempt, message_key) VALUES (?, ?, ?, ?, ?, ?);",
+		"INSERT INTO {} (queue, state, priority, available_at, attempt, target_consumer_id, message_key) VALUES (?, ?, ?, ?, ?, ?, ?);",
 		sqlite_config_.message_index_table
 	);
 
@@ -211,7 +211,8 @@ auto SQLiteAdapter::enqueue(const MessageEnvelope& message) -> std::tuple<bool, 
 	idx_stmt->bind_int(3, message.priority);
 	idx_stmt->bind_int64(4, available_at);
 	idx_stmt->bind_int(5, message.attempt);
-	idx_stmt->bind_text(6, message.key);
+	idx_stmt->bind_text(6, message.target_consumer_id);
+	idx_stmt->bind_text(7, message.key);
 
 	if (idx_stmt->step() != SQLITE_DONE)
 	{
@@ -253,9 +254,11 @@ auto SQLiteAdapter::lease_next(const std::string& queue, const std::string& cons
 	}
 
 	// Find next ready message (priority DESC, available_at ASC)
+	// Filter by target_consumer_id: empty string matches any consumer, otherwise must match exactly
 	std::string select_sql = std::format(
 		"SELECT message_key, priority, attempt FROM {} "
 		"WHERE queue = ? AND state = 'ready' AND available_at <= ? "
+		"AND (target_consumer_id = '' OR target_consumer_id = ?) "
 		"ORDER BY priority DESC, available_at ASC LIMIT 1;",
 		sqlite_config_.message_index_table
 	);
@@ -270,6 +273,7 @@ auto SQLiteAdapter::lease_next(const std::string& queue, const std::string& cons
 
 	select_stmt->bind_text(1, queue);
 	select_stmt->bind_int64(2, now);
+	select_stmt->bind_text(3, consumer_id);
 
 	int step_result = select_stmt->step();
 	if (step_result != SQLITE_ROW)
