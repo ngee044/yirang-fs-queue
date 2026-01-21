@@ -4,6 +4,7 @@
 
 #include "lz4.h"
 
+#include <cstring>
 #include <format>
 
 namespace Utilities
