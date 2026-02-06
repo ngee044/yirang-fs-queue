@@ -35,6 +35,7 @@ struct ValidationRule
 	std::string pattern;
 	std::vector<std::string> enum_values;
 	std::function<bool(const std::string&)> custom_validator;
+	std::string custom_validator_name;
 	std::string error_message;
 };
 
@@ -64,6 +65,10 @@ public:
 	auto validate_json(const std::string& json_str, const std::string& queue) -> ValidationResult;
 	auto get_schema(const std::string& queue) const -> std::optional<MessageSchema>;
 
+	auto register_custom_validator(const std::string& name, std::function<bool(const std::string&)> validator) -> void;
+	auto has_custom_validator(const std::string& name) const -> bool;
+	auto resolve_custom_validators(MessageSchema& schema) -> void;
+
 	static auto required(const std::string& field, const std::string& error_msg = "") -> ValidationRule;
 	static auto type_string(const std::string& field, const std::string& error_msg = "") -> ValidationRule;
 	static auto type_number(const std::string& field, const std::string& error_msg = "") -> ValidationRule;
@@ -81,4 +86,5 @@ private:
 
 private:
 	std::map<std::string, MessageSchema> schemas_;
+	std::map<std::string, std::function<bool(const std::string&)>> custom_validators_;
 };

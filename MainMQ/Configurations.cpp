@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <format>
+#include <regex>
 #include <set>
 
 using json = nlohmann::json;
@@ -747,6 +748,17 @@ namespace
 				if (obj.contains("value") && obj["value"].is_string())
 				{
 					rule.pattern = obj["value"].get<std::string>();
+					try
+					{
+						std::regex test_compile(rule.pattern);
+					}
+					catch (const std::regex_error& e)
+					{
+						Logger::handle().write(LogTypes::Information,
+							std::format("invalid regex pattern '{}' for field '{}': {}",
+								rule.pattern, field, e.what()));
+						return std::nullopt;
+					}
 				}
 				else
 				{
@@ -775,8 +787,24 @@ namespace
 					return std::nullopt;
 				}
 			}
+			else if (type_str == "custom")
+			{
+				rule.type = ValidationRuleType::Custom;
+				if (obj.contains("validator") && obj["validator"].is_string())
+				{
+					rule.custom_validator_name = obj["validator"].get<std::string>();
+				}
+				else
+				{
+					Logger::handle().write(LogTypes::Information,
+						std::format("custom rule for field '{}' missing 'validator' name", field));
+					return std::nullopt;
+				}
+			}
 			else
 			{
+				Logger::handle().write(LogTypes::Information,
+					std::format("unknown validation rule type '{}' for field '{}'", type_str, field));
 				return std::nullopt;
 			}
 

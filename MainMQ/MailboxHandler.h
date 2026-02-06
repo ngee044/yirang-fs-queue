@@ -35,6 +35,9 @@ public:
 	auto register_schema(const std::string& queue, const MessageSchema& schema) -> void;
 	auto unregister_schema(const std::string& queue) -> void;
 
+	// Custom validator registry
+	auto register_custom_validator(const std::string& name, std::function<bool(const std::string&)> validator) -> void;
+
 private:
 	// Directory management
 	auto ensure_directories(void) -> std::tuple<bool, std::optional<std::string>>;

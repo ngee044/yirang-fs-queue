@@ -40,7 +40,9 @@ MailboxHandler::~MailboxHandler(void)
 
 auto MailboxHandler::register_schema(const std::string& queue, const MessageSchema& schema) -> void
 {
-	validator_.register_schema(queue, schema);
+	auto resolved_schema = schema;
+	validator_.resolve_custom_validators(resolved_schema);
+	validator_.register_schema(queue, resolved_schema);
 	Utilities::Logger::handle().write(
 		Utilities::LogTypes::Information,
 		std::format("Registered message schema '{}' for queue '{}'", schema.name, queue)
@@ -50,6 +52,11 @@ auto MailboxHandler::register_schema(const std::string& queue, const MessageSche
 auto MailboxHandler::unregister_schema(const std::string& queue) -> void
 {
 	validator_.unregister_schema(queue);
+}
+
+auto MailboxHandler::register_custom_validator(const std::string& name, std::function<bool(const std::string&)> validator) -> void
+{
+	validator_.register_custom_validator(name, std::move(validator));
 }
 
 auto MailboxHandler::start(void) -> std::tuple<bool, std::optional<std::string>>
@@ -155,10 +162,11 @@ auto MailboxHandler::stop(void) -> void
 	// Notify waiting threads
 	pending_cv_.notify_all();
 
-	// Stop FolderWatcher
+	// Stop and destroy FolderWatcher
 	if (use_folder_watcher_)
 	{
 		Utilities::FolderWatcher::handle().stop();
+		Utilities::FolderWatcher::destroy();
 	}
 
 	thread_pool_->stop(true);
@@ -272,6 +280,10 @@ auto MailboxHandler::process_pending_requests(void) -> void
 		std::error_code ec;
 		if (!std::filesystem::exists(file_path, ec))
 		{
+			Utilities::Logger::handle().write(
+				Utilities::LogTypes::Information,
+				std::format("Request file disappeared before processing: {}", file_path)
+			);
 			continue;
 		}
 

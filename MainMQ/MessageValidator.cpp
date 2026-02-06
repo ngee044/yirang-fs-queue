@@ -253,6 +253,31 @@ auto MessageValidator::validate_rule(const void* json_obj, const ValidationRule&
 	return std::nullopt;
 }
 
+auto MessageValidator::register_custom_validator(const std::string& name, std::function<bool(const std::string&)> validator) -> void
+{
+	custom_validators_[name] = std::move(validator);
+}
+
+auto MessageValidator::has_custom_validator(const std::string& name) const -> bool
+{
+	return custom_validators_.find(name) != custom_validators_.end();
+}
+
+auto MessageValidator::resolve_custom_validators(MessageSchema& schema) -> void
+{
+	for (auto& rule : schema.rules)
+	{
+		if (rule.type == ValidationRuleType::Custom && !rule.custom_validator_name.empty() && !rule.custom_validator)
+		{
+			auto it = custom_validators_.find(rule.custom_validator_name);
+			if (it != custom_validators_.end())
+			{
+				rule.custom_validator = it->second;
+			}
+		}
+	}
+}
+
 auto MessageValidator::required(const std::string& field, const std::string& error_msg) -> ValidationRule
 {
 	ValidationRule rule;
