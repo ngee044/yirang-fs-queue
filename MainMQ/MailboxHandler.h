@@ -1,14 +1,16 @@
 #pragma once
 
 #include "BackendAdapter.h"
+#include "FolderWatcher.h"
 #include "MailboxTypes.h"
 #include "MessageValidator.h"
 #include "ThreadPool.h"
 
 #include <atomic>
-#include <functional>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <string>
 #include <tuple>
 
@@ -29,15 +31,23 @@ public:
 
 	auto is_running(void) const -> bool { return running_.load(); }
 
+	// Schema registration
+	auto register_schema(const std::string& queue, const MessageSchema& schema) -> void;
+	auto unregister_schema(const std::string& queue) -> void;
+
 private:
 	// Directory management
 	auto ensure_directories(void) -> std::tuple<bool, std::optional<std::string>>;
 	auto build_path(const std::string& sub_dir, const std::string& filename = "") -> std::string;
 	auto build_response_path(const std::string& client_id, const std::string& filename = "") -> std::string;
 
+	// FolderWatcher callback
+	auto on_file_changed(const std::string& dir, const std::string& filename, efsw::Action action, const std::string& old_filename) -> void;
+
 	// Request processing loop
 	auto request_processing_worker(void) -> void;
 	auto stale_cleanup_worker(void) -> void;
+	auto process_pending_requests(void) -> void;
 
 	// File operations (atomic write)
 	auto read_request_file(const std::string& file_path) -> std::tuple<std::optional<MailboxRequest>, std::optional<std::string>>;
@@ -91,4 +101,10 @@ private:
 	std::mutex processing_mutex_;
 	mutable std::mutex metrics_mutex_;
 	MailboxMetrics metrics_;
+
+	// FolderWatcher integration
+	std::queue<std::string> pending_requests_;
+	std::mutex pending_mutex_;
+	std::condition_variable pending_cv_;
+	bool use_folder_watcher_;
 };

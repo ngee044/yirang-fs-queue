@@ -28,6 +28,7 @@ MailboxHandler::MailboxHandler(
 	, config_(config)
 	, backend_(backend)
 	, queue_manager_(queue_manager)
+	, use_folder_watcher_(true)
 {
 	thread_pool_ = std::make_shared<Thread::ThreadPool>("MailboxHandler");
 }
@@ -35,6 +36,20 @@ MailboxHandler::MailboxHandler(
 MailboxHandler::~MailboxHandler(void)
 {
 	stop();
+}
+
+auto MailboxHandler::register_schema(const std::string& queue, const MessageSchema& schema) -> void
+{
+	validator_.register_schema(queue, schema);
+	Utilities::Logger::handle().write(
+		Utilities::LogTypes::Information,
+		std::format("Registered message schema '{}' for queue '{}'", schema.name, queue)
+	);
+}
+
+auto MailboxHandler::unregister_schema(const std::string& queue) -> void
+{
+	validator_.unregister_schema(queue);
 }
 
 auto MailboxHandler::start(void) -> std::tuple<bool, std::optional<std::string>>
@@ -78,6 +93,24 @@ auto MailboxHandler::start(void) -> std::tuple<bool, std::optional<std::string>>
 
 	running_.store(true);
 
+	// Setup FolderWatcher if enabled
+	if (use_folder_watcher_)
+	{
+		auto& watcher = Utilities::FolderWatcher::handle();
+		watcher.set_callback([this](const std::string& dir, const std::string& filename, efsw::Action action, const std::string& old_filename)
+		{
+			on_file_changed(dir, filename, action, old_filename);
+		});
+
+		auto request_dir = build_path(config_.requests_dir);
+		watcher.start({ { request_dir, false } });
+
+		Utilities::Logger::handle().write(
+			Utilities::LogTypes::Information,
+			std::format("FolderWatcher started on: {}", request_dir)
+		);
+	}
+
 	// Launch request processing worker
 	auto request_job = std::make_shared<Thread::Job>(
 		Thread::JobPriorities::LongTerm,
@@ -104,7 +137,7 @@ auto MailboxHandler::start(void) -> std::tuple<bool, std::optional<std::string>>
 
 	Utilities::Logger::handle().write(
 		Utilities::LogTypes::Information,
-		std::format("MailboxHandler started (root: {})", config_.root)
+		std::format("MailboxHandler started (root: {}, mode: {})", config_.root, use_folder_watcher_ ? "event-driven" : "polling")
 	);
 
 	return { true, std::nullopt };
@@ -118,6 +151,16 @@ auto MailboxHandler::stop(void) -> void
 	}
 
 	running_.store(false);
+
+	// Notify waiting threads
+	pending_cv_.notify_all();
+
+	// Stop FolderWatcher
+	if (use_folder_watcher_)
+	{
+		Utilities::FolderWatcher::handle().stop();
+	}
+
 	thread_pool_->stop(true);
 
 	Utilities::Logger::handle().write(
@@ -180,86 +223,231 @@ auto MailboxHandler::build_response_path(const std::string& client_id, const std
 	return path.string();
 }
 
+auto MailboxHandler::on_file_changed(const std::string& dir, const std::string& filename, efsw::Action action, const std::string& old_filename) -> void
+{
+	// Only process new JSON files
+	if (action != efsw::Action::Add)
+	{
+		return;
+	}
+
+	if (filename.size() < 5 || filename.substr(filename.size() - 5) != ".json")
+	{
+		return;
+	}
+
+	std::filesystem::path file_path = dir;
+	file_path /= filename;
+
+	{
+		std::lock_guard<std::mutex> lock(pending_mutex_);
+		pending_requests_.push(file_path.string());
+	}
+	pending_cv_.notify_one();
+}
+
+auto MailboxHandler::process_pending_requests(void) -> void
+{
+	std::vector<std::string> requests_to_process;
+
+	{
+		std::lock_guard<std::mutex> lock(pending_mutex_);
+		while (!pending_requests_.empty())
+		{
+			requests_to_process.push_back(pending_requests_.front());
+			pending_requests_.pop();
+		}
+	}
+
+	for (const auto& file_path : requests_to_process)
+	{
+		if (!running_.load())
+		{
+			break;
+		}
+
+		std::lock_guard<std::mutex> lock(processing_mutex_);
+
+		// Check if file still exists
+		std::error_code ec;
+		if (!std::filesystem::exists(file_path, ec))
+		{
+			continue;
+		}
+
+		// Move to processing
+		auto [processing_path, move_error] = move_to_processing(file_path);
+		if (move_error.has_value())
+		{
+			Utilities::Logger::handle().write(
+				Utilities::LogTypes::Error,
+				std::format("Failed to move request to processing: {}", move_error.value())
+			);
+			continue;
+		}
+
+		// Read and parse request
+		auto [request_opt, read_error] = read_request_file(processing_path);
+		if (!request_opt.has_value())
+		{
+			Utilities::Logger::handle().write(
+				Utilities::LogTypes::Error,
+				std::format("Failed to read request: {}", read_error.value_or("unknown"))
+			);
+			move_to_dead(processing_path, read_error.value_or("parse error"));
+			continue;
+		}
+
+		auto& request = request_opt.value();
+
+		// Start metrics timing
+		auto start_time = record_request_start();
+
+		// Check deadline
+		auto now = current_time_ms();
+		if (request.deadline_ms > 0 && now > request.deadline_ms)
+		{
+			Utilities::Logger::handle().write(
+				Utilities::LogTypes::Information,
+				std::format("Request {} expired (deadline: {}, now: {})",
+					request.request_id, request.deadline_ms, now)
+			);
+			move_to_dead(processing_path, "deadline exceeded");
+			record_request_end(request.command, false, MailboxErrorCode::TIMEOUT, start_time);
+			continue;
+		}
+
+		// Handle request
+		auto response = handle_request(request);
+
+		// Record metrics
+		record_request_end(request.command, response.ok, response.error_code, start_time);
+
+		// Write response
+		auto [write_ok, write_error] = write_response_file(request.client_id, response);
+		if (!write_ok)
+		{
+			Utilities::Logger::handle().write(
+				Utilities::LogTypes::Error,
+				std::format("Failed to write response for request {}: {}",
+					request.request_id, write_error.value_or("unknown"))
+			);
+		}
+
+		// Delete processed file
+		delete_processed(processing_path);
+	}
+}
+
 auto MailboxHandler::request_processing_worker(void) -> void
 {
+	// Process any existing files on startup
+	auto request_dir = build_path(config_.requests_dir);
+	auto existing_files = list_files(request_dir);
+	for (const auto& file_path : existing_files)
+	{
+		std::lock_guard<std::mutex> lock(pending_mutex_);
+		pending_requests_.push(file_path);
+	}
+
 	while (running_.load())
 	{
-		auto request_dir = build_path(config_.requests_dir);
-		auto files = list_files(request_dir);
-
-		for (const auto& file_path : files)
+		if (use_folder_watcher_)
 		{
+			// Event-driven mode: wait for notification or timeout
+			std::unique_lock<std::mutex> lock(pending_mutex_);
+			pending_cv_.wait_for(lock, std::chrono::milliseconds(config_.poll_interval_ms), [this]()
+			{
+				return !pending_requests_.empty() || !running_.load();
+			});
+			lock.unlock();
+
 			if (!running_.load())
 			{
 				break;
 			}
 
-			std::lock_guard<std::mutex> lock(processing_mutex_);
-
-			// Move to processing
-			auto [processing_path, move_error] = move_to_processing(file_path);
-			if (move_error.has_value())
-			{
-				Utilities::Logger::handle().write(
-					Utilities::LogTypes::Error,
-					std::format("Failed to move request to processing: {}", move_error.value())
-				);
-				continue;
-			}
-
-			// Read and parse request
-			auto [request_opt, read_error] = read_request_file(processing_path);
-			if (!request_opt.has_value())
-			{
-				Utilities::Logger::handle().write(
-					Utilities::LogTypes::Error,
-					std::format("Failed to read request: {}", read_error.value_or("unknown"))
-				);
-				move_to_dead(processing_path, read_error.value_or("parse error"));
-				continue;
-			}
-
-			auto& request = request_opt.value();
-
-			// Start metrics timing
-			auto start_time = record_request_start();
-
-			// Check deadline
-			auto now = current_time_ms();
-			if (request.deadline_ms > 0 && now > request.deadline_ms)
-			{
-				Utilities::Logger::handle().write(
-					Utilities::LogTypes::Information,
-					std::format("Request {} expired (deadline: {}, now: {})",
-						request.request_id, request.deadline_ms, now)
-				);
-				move_to_dead(processing_path, "deadline exceeded");
-				record_request_end(request.command, false, MailboxErrorCode::TIMEOUT, start_time);
-				continue;
-			}
-
-			// Handle request
-			auto response = handle_request(request);
-
-			// Record metrics
-			record_request_end(request.command, response.ok, response.error_code, start_time);
-
-			// Write response
-			auto [write_ok, write_error] = write_response_file(request.client_id, response);
-			if (!write_ok)
-			{
-				Utilities::Logger::handle().write(
-					Utilities::LogTypes::Error,
-					std::format("Failed to write response for request {}: {}",
-						request.request_id, write_error.value_or("unknown"))
-				);
-			}
-
-			// Delete processed file
-			delete_processed(processing_path);
+			process_pending_requests();
 		}
+		else
+		{
+			// Polling mode (fallback)
+			auto files = list_files(request_dir);
 
-		std::this_thread::sleep_for(std::chrono::milliseconds(config_.poll_interval_ms));
+			for (const auto& file_path : files)
+			{
+				if (!running_.load())
+				{
+					break;
+				}
+
+				std::lock_guard<std::mutex> lock(processing_mutex_);
+
+				// Move to processing
+				auto [processing_path, move_error] = move_to_processing(file_path);
+				if (move_error.has_value())
+				{
+					Utilities::Logger::handle().write(
+						Utilities::LogTypes::Error,
+						std::format("Failed to move request to processing: {}", move_error.value())
+					);
+					continue;
+				}
+
+				// Read and parse request
+				auto [request_opt, read_error] = read_request_file(processing_path);
+				if (!request_opt.has_value())
+				{
+					Utilities::Logger::handle().write(
+						Utilities::LogTypes::Error,
+						std::format("Failed to read request: {}", read_error.value_or("unknown"))
+					);
+					move_to_dead(processing_path, read_error.value_or("parse error"));
+					continue;
+				}
+
+				auto& request = request_opt.value();
+
+				// Start metrics timing
+				auto start_time = record_request_start();
+
+				// Check deadline
+				auto now = current_time_ms();
+				if (request.deadline_ms > 0 && now > request.deadline_ms)
+				{
+					Utilities::Logger::handle().write(
+						Utilities::LogTypes::Information,
+						std::format("Request {} expired (deadline: {}, now: {})",
+							request.request_id, request.deadline_ms, now)
+					);
+					move_to_dead(processing_path, "deadline exceeded");
+					record_request_end(request.command, false, MailboxErrorCode::TIMEOUT, start_time);
+					continue;
+				}
+
+				// Handle request
+				auto response = handle_request(request);
+
+				// Record metrics
+				record_request_end(request.command, response.ok, response.error_code, start_time);
+
+				// Write response
+				auto [write_ok, write_error] = write_response_file(request.client_id, response);
+				if (!write_ok)
+				{
+					Utilities::Logger::handle().write(
+						Utilities::LogTypes::Error,
+						std::format("Failed to write response for request {}: {}",
+							request.request_id, write_error.value_or("unknown"))
+					);
+				}
+
+				// Delete processed file
+				delete_processed(processing_path);
+			}
+
+			std::this_thread::sleep_for(std::chrono::milliseconds(config_.poll_interval_ms));
+		}
 	}
 }
 

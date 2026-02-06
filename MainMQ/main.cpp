@@ -115,6 +115,15 @@ auto main(int argc, char* argv[]) -> int
 		configurations_->mailbox_config()
 	);
 
+	// Register message schemas from configuration
+	for (auto& queue_config : configurations_->queues())
+	{
+		if (queue_config.message_schema.has_value())
+		{
+			mailbox_handler_->register_schema(queue_config.name, queue_config.message_schema.value());
+		}
+	}
+
 	auto [mailbox_started, mailbox_error] = mailbox_handler_->start();
 	if (!mailbox_started)
 	{

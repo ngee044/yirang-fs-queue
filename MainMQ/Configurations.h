@@ -4,7 +4,9 @@
 #include "BackendAdapter.h"
 #include "LogTypes.h"
 #include "MailboxTypes.h"
+#include "MessageValidator.h"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,6 +24,7 @@ struct QueueConfig
 {
 	std::string name;
 	QueuePolicy policy;
+	std::optional<MessageSchema> message_schema;
 };
 
 		class Configurations
@@ -83,6 +86,8 @@ struct QueueConfig
 			auto load_retry_policy(const void* json_obj) -> RetryPolicy;
 			auto load_dlq_policy(const void* json_obj) -> DlqPolicy;
 			auto load_queue_policy(const void* json_obj) -> QueuePolicy;
+			auto load_message_schema(const void* json_obj) -> std::optional<MessageSchema>;
+			auto load_validation_rule(const void* json_obj) -> std::optional<ValidationRule>;
 			auto validate_retry_policy(RetryPolicy& policy, const std::string& context) -> void;
 			auto validate_queue_policy(QueuePolicy& policy, const std::string& context) -> void;
 

@@ -66,6 +66,26 @@
           "queue": "telemetry-dlq",
           "retentionDays": 14
         }
+      },
+      "messageSchema": {
+        "name": "TelemetryMessage",
+        "description": "Telemetry data message schema",
+        "rules": [
+          {
+            "field": "deviceId",
+            "type": "required"
+          },
+          {
+            "field": "deviceId",
+            "type": "type",
+            "expectedType": "string"
+          },
+          {
+            "field": "timestamp",
+            "type": "type",
+            "expectedType": "number"
+          }
+        ]
       }
     }
   ]

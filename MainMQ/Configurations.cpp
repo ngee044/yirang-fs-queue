@@ -358,6 +358,10 @@ namespace
 						{
 							queue_config.policy = policy_defaults_;
 						}
+						if (queue_json.contains("messageSchema") && queue_json["messageSchema"].is_object())
+						{
+							queue_config.message_schema = load_message_schema(&queue_json["messageSchema"]);
+						}
 						queues_.push_back(queue_config);
 					}
 				}
@@ -609,4 +613,168 @@ namespace
 					std::format("{}: dlq.retentionDays ({}) must be > 0, using 14", context, policy.dlq.retention_days));
 				policy.dlq.retention_days = 14;
 			}
+		}
+
+		auto Configurations::load_message_schema(const void* json_obj) -> std::optional<MessageSchema>
+		{
+			const json& obj = *static_cast<const json*>(json_obj);
+
+			MessageSchema schema;
+
+			if (obj.contains("name") && obj["name"].is_string())
+			{
+				schema.name = obj["name"].get<std::string>();
+			}
+
+			if (obj.contains("description") && obj["description"].is_string())
+			{
+				schema.description = obj["description"].get<std::string>();
+			}
+
+			if (obj.contains("rules") && obj["rules"].is_array())
+			{
+				for (const auto& rule_json : obj["rules"])
+				{
+					auto rule_opt = load_validation_rule(&rule_json);
+					if (rule_opt.has_value())
+					{
+						schema.rules.push_back(rule_opt.value());
+					}
+				}
+			}
+
+			if (schema.rules.empty())
+			{
+				return std::nullopt;
+			}
+
+			return schema;
+		}
+
+		auto Configurations::load_validation_rule(const void* json_obj) -> std::optional<ValidationRule>
+		{
+			const json& obj = *static_cast<const json*>(json_obj);
+
+			if (!obj.contains("field") || !obj["field"].is_string())
+			{
+				return std::nullopt;
+			}
+
+			if (!obj.contains("type") || !obj["type"].is_string())
+			{
+				return std::nullopt;
+			}
+
+			std::string field = obj["field"].get<std::string>();
+			std::string type_str = obj["type"].get<std::string>();
+			std::string error_msg = obj.value("errorMessage", "");
+
+			ValidationRule rule;
+			rule.field = field;
+			rule.error_message = error_msg;
+
+			if (type_str == "required")
+			{
+				rule.type = ValidationRuleType::Required;
+			}
+			else if (type_str == "type")
+			{
+				rule.type = ValidationRuleType::Type;
+				if (obj.contains("expectedType") && obj["expectedType"].is_string())
+				{
+					rule.expected_type = obj["expectedType"].get<std::string>();
+				}
+				else
+				{
+					return std::nullopt;
+				}
+			}
+			else if (type_str == "minLength")
+			{
+				rule.type = ValidationRuleType::MinLength;
+				if (obj.contains("value") && obj["value"].is_number())
+				{
+					rule.min_length = obj["value"].get<int64_t>();
+				}
+				else
+				{
+					return std::nullopt;
+				}
+			}
+			else if (type_str == "maxLength")
+			{
+				rule.type = ValidationRuleType::MaxLength;
+				if (obj.contains("value") && obj["value"].is_number())
+				{
+					rule.max_length = obj["value"].get<int64_t>();
+				}
+				else
+				{
+					return std::nullopt;
+				}
+			}
+			else if (type_str == "minValue")
+			{
+				rule.type = ValidationRuleType::MinValue;
+				if (obj.contains("value") && obj["value"].is_number())
+				{
+					rule.min_value = obj["value"].get<double>();
+				}
+				else
+				{
+					return std::nullopt;
+				}
+			}
+			else if (type_str == "maxValue")
+			{
+				rule.type = ValidationRuleType::MaxValue;
+				if (obj.contains("value") && obj["value"].is_number())
+				{
+					rule.max_value = obj["value"].get<double>();
+				}
+				else
+				{
+					return std::nullopt;
+				}
+			}
+			else if (type_str == "pattern")
+			{
+				rule.type = ValidationRuleType::Pattern;
+				if (obj.contains("value") && obj["value"].is_string())
+				{
+					rule.pattern = obj["value"].get<std::string>();
+				}
+				else
+				{
+					return std::nullopt;
+				}
+			}
+			else if (type_str == "enum")
+			{
+				rule.type = ValidationRuleType::Enum;
+				if (obj.contains("values") && obj["values"].is_array())
+				{
+					for (const auto& val : obj["values"])
+					{
+						if (val.is_string())
+						{
+							rule.enum_values.push_back(val.get<std::string>());
+						}
+					}
+					if (rule.enum_values.empty())
+					{
+						return std::nullopt;
+					}
+				}
+				else
+				{
+					return std::nullopt;
+				}
+			}
+			else
+			{
+				return std::nullopt;
+			}
+
+			return rule;
 		}
